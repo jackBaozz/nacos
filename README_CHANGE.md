@@ -44,19 +44,20 @@
   * 为这两个新属性提供 Getter 及 Setter 支持。
   * 在配置动态监听事件 `onEvent(ServerConfigChangeEvent event)` 中，增加对这两项属性的动态热更新支持。
 
-### 4. 鉴权过滤器过滤逻辑改造
-* **变动文件**：[AuthFilter.java](file:///Users/bao/work/idea_workspace/nacos/core/src/main/java/com/alibaba/nacos/core/auth/AuthFilter.java)
+### 4. 鉴权过滤器过滤逻辑改造 (适配 HTTP 1.x 与 gRPC 2.x 客户端)
+* **变动文件**：
+  * [AuthFilter.java](file:///Users/bao/work/idea_workspace/nacos/core/src/main/java/com/alibaba/nacos/core/auth/AuthFilter.java)
+  * [RemoteRequestAuthFilter.java](file:///Users/bao/work/idea_workspace/nacos/core/src/main/java/com/alibaba/nacos/core/auth/RemoteRequestAuthFilter.java)
 * **具体修改**：
-  * 新增辅助方法 `getRemoteHost(HttpServletRequest request)`，通过读取多层 HTTP 请求头获取客户端真实 IP 地址。
-  * 新增老客户端放行检测方法 `isLegacyClientAllowed` 和路径规范化方法 `normalizePath`，精准识别对老微服务核心必需的 GET/POST API。
-  * 改造 `doFilter` 拦截过滤入口：在执行正式身份校验前，依次增加**老客户端 API 兼容放行判断**与**IP 白名单放行判断**，如果命中任一条件，即调用 `chain.doFilter` 放行。
+  * `AuthFilter.java` (针对 HTTP)：新增辅助方法 `getRemoteHost(HttpServletRequest request)` 提取真实 IP；新增 `isLegacyClientAllowed` 拦截放行核心 HTTP 接口。改造 `doFilter` 依次增加老客户端 API 兼容与 IP 白名单放行判断。
+  * `RemoteRequestAuthFilter.java` (针对 gRPC)：为 Nacos 2.x 客户端引入同等放行逻辑。新增 `isLegacyClientAllowed` 方法拦截 `InstanceRequest`, `ServiceQueryRequest`, `SubscribeServiceRequest` (服务注册与发现) 及 `ConfigQueryRequest`, `ConfigBatchListenRequest` (配置拉取与监听) 等核心 gRPC 请求，实现 SOFARPC 等新型客户端在兼容模式下的无密码访问。
 
 ### 5. 默认配置文件调整
 * **变动文件**：[application.properties](file:///Users/bao/work/idea_workspace/nacos/console/src/main/resources/application.properties)
 * **具体修改**：
-  * **端口修改**：将默认运行端口 `server.port` 从 `8848` 修改为 `28848` (注: 后来您已手动改回 8848)。
-  * **数据库启用**：启用了 MySQL 数据源配置，配置 `db.num=1`，并默认写入了特定的测试库链接及密码。
-  * **鉴权开启**：曾将 `nacos.core.auth.enabled` 默认值设为 `true` (注: 后来您已手动改回 false)。
+  * **端口保持默认**：运行端口 `server.port` 保持 `8848`。
+  * **数据库默认关闭**：默认已将 `spring.sql.init.platform=mysql` 及相关配置注释掉。如果您在替换 Jar 包后启动报错 `No DataSource set`，请使用原始完整配置文件或保持此默认配置，确保单机模式正常使用 Derby 数据库。
+  * **鉴权默认关闭**：`nacos.core.auth.enabled` 默认为 `false`。
   * **新增开关默认值**：
     * `nacos.core.auth.enable.ipAuthWhite=10.5.84.204,127.0.0.1`。
     * `nacos.security.legacy-client.anonymous.enabled=true`。
@@ -94,3 +95,20 @@
 * **效果**：Nacos 鉴权彻底**关闭**。
 * **业务表现**：一切畅通无阻。任何人都可以免密打开 Web 控制台，随意发送请求删掉生产环境的配置，注册垃圾服务等。
 * **适用场景**：仅限于本地开发调试，或者完全与外网隔离、内部绝对互信的安全局域网环境。
+
+---
+
+## 四、 生产环境安全配置警告 (Security Best Practices)
+
+> [!WARNING]
+> **切勿在生产环境使用默认 JWT 密钥！**
+
+在开启 Nacos 鉴权（`nacos.core.auth.enabled=true`）时，**必须**在服务器外部的 `conf/application.properties` 中手动配置自定义的 JWT 密钥 `nacos.core.auth.plugin.nacos.token.secret.key`。
+
+* **安全隐患**：如果该配置项为空，Nacos 会回退使用开源代码中硬编码的默认公开密钥（例如 `SecretKey01234...`）。这意味着即使开启了鉴权，外部攻击者也可以利用这个公开密钥，随意伪造包含超管权限的 `accessToken` 并在您的服务器上畅通无阻！
+* **正确做法**：在上生产环境前，请务必生成一个**长度大于等于 32 字节且使用 Base64 编码的随机字符串**，并显式配置，例如：
+  ```properties
+  nacos.core.auth.plugin.nacos.token.secret.key=VGhpc0lzQU15U2VjcmV0S2V5VGhhdE5vYm9keUtub3dzMTIzNDU2Nzg5MA==
+  ```
+
+只要确保配置了您专属的、不泄露的 `secret.key`，任何由外部伪造或篡改的 Token（无论是修改了用户名还是篡改了过期时间）都会在 Nacos 重新计算签名比对时，因为签名不匹配抛出 `SignatureException` 并被 100% 拦截。

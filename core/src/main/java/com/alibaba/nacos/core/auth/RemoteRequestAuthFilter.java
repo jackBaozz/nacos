@@ -43,6 +43,36 @@ import java.lang.reflect.Method;
  */
 @Component
 public class RemoteRequestAuthFilter extends AbstractRequestFilter {
+
+    /**
+     * Request type ConfigQueryRequest.
+     */
+    private static final String REQ_CONFIG_QUERY = "ConfigQueryRequest";
+
+    /**
+     * Request type ConfigBatchListenRequest.
+     */
+    private static final String REQ_CONFIG_LISTEN = "ConfigBatchListenRequest";
+
+    /**
+     * Request type InstanceRequest.
+     */
+    private static final String REQ_INSTANCE = "InstanceRequest";
+
+    /**
+     * Request type BatchInstanceRequest.
+     */
+    private static final String REQ_BATCH_INSTANCE = "BatchInstanceRequest";
+
+    /**
+     * Request type ServiceQueryRequest.
+     */
+    private static final String REQ_SERVICE_QUERY = "ServiceQueryRequest";
+
+    /**
+     * Request type SubscribeServiceRequest.
+     */
+    private static final String REQ_SUBSCRIBE_SERVICE = "SubscribeServiceRequest";
     
     private final AuthConfigs authConfigs;
     
@@ -52,6 +82,23 @@ public class RemoteRequestAuthFilter extends AbstractRequestFilter {
         this.authConfigs = authConfigs;
         this.protocolAuthService = new GrpcProtocolAuthService(authConfigs);
         this.protocolAuthService.initialize();
+    }
+
+    /**
+     * 判断是否为兼容老客户端允许匿名访问的 gRPC 请求.
+     *
+     * @param request 请求对象
+     * @return 是否放行
+     */
+    private boolean isLegacyClientAllowed(Request request) {
+        String requestType = request.getClass().getSimpleName();
+        if (REQ_CONFIG_QUERY.equals(requestType) || REQ_CONFIG_LISTEN.equals(requestType)) {
+            return true;
+        }
+        if (REQ_INSTANCE.equals(requestType) || REQ_BATCH_INSTANCE.equals(requestType)) {
+            return true;
+        }
+        return REQ_SERVICE_QUERY.equals(requestType) || REQ_SUBSCRIBE_SERVICE.equals(requestType);
     }
     
     @Override
@@ -70,6 +117,15 @@ public class RemoteRequestAuthFilter extends AbstractRequestFilter {
                 if (!protocolAuthService.enableAuth(secured)) {
                     return null;
                 }
+                
+                // 兼容模式：如果开启了老客户端匿名访问，则对核心 gRPC 请求放行
+                if (authConfigs.isLegacyClientAnonymousEnabled() && isLegacyClientAllowed(request)) {
+                    if (Loggers.AUTH.isDebugEnabled()) {
+                        Loggers.AUTH.debug("legacy client anonymous access allowed for gRPC request: {}", request.getClass().getSimpleName());
+                    }
+                    return null;
+                }
+
                 String clientIp = meta.getClientIp();
                 request.putHeader(Constants.Identity.X_REAL_IP, clientIp);
                 Resource resource = protocolAuthService.parseResource(request, secured);
