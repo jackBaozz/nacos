@@ -62,6 +62,39 @@ public class AuthFilter implements Filter {
     
     public static final String UNKNOWN = "unknown";
     
+    /**
+     * HTTP 方法常量.
+     */
+    private static final String METHOD_GET = "GET";
+    
+    private static final String METHOD_POST = "POST";
+    
+    private static final String METHOD_PUT = "PUT";
+    
+    private static final String METHOD_DELETE = "DELETE";
+
+    /**
+     * 当开启了 nacos.security.legacy-client.anonymous.enabled=true 时，
+     * Nacos 会对以下核心接口进行匿名放行
+     * 1. 配置发布/删除/修改/查询
+     * 2. 服务发现查询实例列表.
+     */
+    private static final String URI_CS_CONFIGS = "/v1/cs/configs";
+    
+    private static final String URI_CS_CONFIGS_LISTENER = "/v1/cs/configs/listener";
+    
+    private static final String URI_NS_INSTANCE = "/v1/ns/instance";
+    
+    private static final String URI_NS_INSTANCE_BEAT = "/v1/ns/instance/beat";
+    
+    private static final String URI_NS_INSTANCE_LIST = "/v1/ns/instance/list";
+    
+    private static final String URI_NS_SERVICE_LIST = "/v1/ns/service/list";
+    
+    private static final String URI_NACOS_PREFIX = "/nacos/";
+    
+    private static final String URI_NACOS_PREFIX_REPLACE = "/nacos";
+    
     private final AuthConfigs authConfigs;
     
     private final ControllerMethodsCache methodsCache;
@@ -216,7 +249,7 @@ public class AuthFilter implements Filter {
     }
     
     /**
-     * 检查是否是需要匿名放行的老客户端请求(核心修改逻辑)
+     * 检查是否是需要匿名放行的老客户端请求(核心修改逻辑).
      */
     private boolean isLegacyClientAllowed(HttpServletRequest request) {
         if (!authConfigs.isLegacyClientAnonymousEnabled()) {
@@ -227,38 +260,39 @@ public class AuthFilter implements Filter {
         String method = request.getMethod();
 
         // 配置拉取：允许
-        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/cs/configs")) {
+        if (METHOD_GET.equalsIgnoreCase(method) && URI_CS_CONFIGS.equals(path)) {
             return true;
         }
 
         // 配置监听：Nacos 客户端监听配置变更通常会用这个接口
-        if ("POST".equalsIgnoreCase(method) && path.equals("/v1/cs/configs/listener")) {
+        if (METHOD_POST.equalsIgnoreCase(method) && URI_CS_CONFIGS_LISTENER.equals(path)) {
             return true;
         }
 
         // 服务注册
-        if ("POST".equalsIgnoreCase(method) && path.equals("/v1/ns/instance")) {
+        if (METHOD_POST.equalsIgnoreCase(method) && URI_NS_INSTANCE.equals(path)) {
             return true;
         }
 
         // 服务注销
-        if ("DELETE".equalsIgnoreCase(method) && path.equals("/v1/ns/instance")) {
+        if (METHOD_DELETE.equalsIgnoreCase(method) && URI_NS_INSTANCE.equals(path)) {
             return true;
         }
 
         // 服务心跳
-        if (("PUT".equalsIgnoreCase(method) || "POST".equalsIgnoreCase(method))
-                && path.equals("/v1/ns/instance/beat")) {
-            return true;
+        if (URI_NS_INSTANCE_BEAT.equals(path)) {
+            if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_POST.equalsIgnoreCase(method)) {
+                return true;
+            }
         }
 
         // 服务发现：查询实例列表
-        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/ns/instance/list")) {
+        if (METHOD_GET.equalsIgnoreCase(method) && URI_NS_INSTANCE_LIST.equals(path)) {
             return true;
         }
 
         // 查询服务列表，部分老客户端/工具可能会用
-        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/ns/service/list")) {
+        if (METHOD_GET.equalsIgnoreCase(method) && URI_NS_SERVICE_LIST.equals(path)) {
             return true;
         }
 
@@ -267,8 +301,8 @@ public class AuthFilter implements Filter {
 
     /**
      * 规范化请求路径，用于鉴权匹配。
-     * 
-     * 主要步骤包括：
+     *
+     * <p>主要步骤包括：
      * 1. 获取请求的 URI。
      * 2. 去除上下文路径（Context Path）。
      * 3. 去除前缀 "/nacos"（如果存在，例如 "/nacos/..." 会变为 "/..."）。
@@ -289,8 +323,8 @@ public class AuthFilter implements Filter {
         }
 
         // 如果路径是以 "/nacos/" 开头，剥离前面的 "/nacos" 前缀
-        if (uri.startsWith("/nacos/")) {
-            uri = uri.substring("/nacos".length());
+        if (uri.startsWith(URI_NACOS_PREFIX)) {
+            uri = uri.substring(URI_NACOS_PREFIX_REPLACE.length());
         }
 
         // 将多个连续的斜杠替换为单个斜杠（例如：///a//b -> /a/b）
