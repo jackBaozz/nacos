@@ -81,6 +81,9 @@ public class AuthConfigs extends Subscriber<ServerConfigChangeEvent> {
     @Value("${nacos.core.auth.enable.ipAuthWhite:}")
     private String whiteIpStr;
     
+    @Value("${nacos.security.legacy-client.anonymous.enabled:false}")
+    private boolean legacyClientAnonymousEnabled;
+    
     private Map<String, Properties> authPluginProperties = new HashMap<>();
     
     public AuthConfigs() {
@@ -147,6 +150,10 @@ public class AuthConfigs extends Subscriber<ServerConfigChangeEvent> {
         return whiteIpStr;
     }
     
+    public boolean isLegacyClientAnonymousEnabled() {
+        return legacyClientAnonymousEnabled;
+    }
+    
     /**
      * auth function is open.
      *
@@ -190,8 +197,10 @@ public class AuthConfigs extends Subscriber<ServerConfigChangeEvent> {
             serverIdentityValue = EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_SERVER_IDENTITY_VALUE, "");
             enableUserAgentAuthWhite = EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_ENABLE_USER_AGENT_AUTH_WHITE, Boolean.class, false);
             nacosAuthSystemType = EnvUtil.getProperty(Constants.Auth.NACOS_CORE_AUTH_SYSTEM_TYPE, "");
-            //新属性IP白名单
+            //新属性：IP白名单
             whiteIpStr = EnvUtil.getProperty("nacos.core.auth.enable.ipAuthWhite", "");
+            //新属性：老客户端匿名放行
+            legacyClientAnonymousEnabled = EnvUtil.getProperty("nacos.security.legacy-client.anonymous.enabled", Boolean.class, false);
             refreshPluginProperties();
             ModuleStateHolder.getInstance().getModuleState(AuthModuleStateBuilder.AUTH_MODULE)
                     .ifPresent(moduleState -> {

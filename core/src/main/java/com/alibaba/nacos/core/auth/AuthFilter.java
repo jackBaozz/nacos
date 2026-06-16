@@ -88,6 +88,12 @@ public class AuthFilter implements Filter {
         HttpServletResponse resp = (HttpServletResponse) response;
         String originIp = getRemoteHost(req);
         
+        // 【兼容逻辑】检查是否是需要匿名放行的老客户端请求
+        if (isLegacyClientAllowed(req)) {
+            chain.doFilter(request, response);
+            return;
+        }
+        
         if (StringUtils.isNotBlank(authConfigs.getWhiteIpStr())) {
             // 这里是新加的过滤规则,某些特定的IP地址可以直接访问Nacos不需要权限校验
             String whiteIpStr = authConfigs.getWhiteIpStr();
@@ -207,6 +213,90 @@ public class AuthFilter implements Filter {
             ip = request.getRemoteAddr();
         }
         return AN_OBJECT.equals(ip) ? LOCALHOST_STRING : ip;
+    }
+    
+    /**
+     * 检查是否是需要匿名放行的老客户端请求(核心修改逻辑)
+     */
+    private boolean isLegacyClientAllowed(HttpServletRequest request) {
+        if (!authConfigs.isLegacyClientAnonymousEnabled()) {
+            return false;
+        }
+
+        String path = normalizePath(request);
+        String method = request.getMethod();
+
+        // 配置拉取：允许
+        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/cs/configs")) {
+            return true;
+        }
+
+        // 配置监听：Nacos 客户端监听配置变更通常会用这个接口
+        if ("POST".equalsIgnoreCase(method) && path.equals("/v1/cs/configs/listener")) {
+            return true;
+        }
+
+        // 服务注册
+        if ("POST".equalsIgnoreCase(method) && path.equals("/v1/ns/instance")) {
+            return true;
+        }
+
+        // 服务注销
+        if ("DELETE".equalsIgnoreCase(method) && path.equals("/v1/ns/instance")) {
+            return true;
+        }
+
+        // 服务心跳
+        if (("PUT".equalsIgnoreCase(method) || "POST".equalsIgnoreCase(method))
+                && path.equals("/v1/ns/instance/beat")) {
+            return true;
+        }
+
+        // 服务发现：查询实例列表
+        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/ns/instance/list")) {
+            return true;
+        }
+
+        // 查询服务列表，部分老客户端/工具可能会用
+        if ("GET".equalsIgnoreCase(method) && path.equals("/v1/ns/service/list")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 规范化请求路径，用于鉴权匹配。
+     * 
+     * 主要步骤包括：
+     * 1. 获取请求的 URI。
+     * 2. 去除上下文路径（Context Path）。
+     * 3. 去除前缀 "/nacos"（如果存在，例如 "/nacos/..." 会变为 "/..."）。
+     * 4. 将连续的多个斜杠（"//" 等）替换为单个斜杠。
+     * 5. 将结果转换为小写以进行大小写无关的匹配。
+     *
+     * @param request 客户端的 HTTP 请求
+     * @return 规范化后的路径字符串
+     */
+    private String normalizePath(HttpServletRequest request) {
+        // 获取请求的完整 URI
+        String uri = request.getRequestURI();
+
+        // 如果配置了 ContextPath，且 URI 以该 ContextPath 开头，则将其剥离
+        String contextPath = request.getContextPath();
+        if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
+            uri = uri.substring(contextPath.length());
+        }
+
+        // 如果路径是以 "/nacos/" 开头，剥离前面的 "/nacos" 前缀
+        if (uri.startsWith("/nacos/")) {
+            uri = uri.substring("/nacos".length());
+        }
+
+        // 将多个连续的斜杠替换为单个斜杠（例如：///a//b -> /a/b）
+        uri = uri.replaceAll("/{2,}", "/");
+        // 统一转换为小写，保证路径匹配时大小写不敏感
+        return uri.toLowerCase(java.util.Locale.ROOT);
     }
     
 }
