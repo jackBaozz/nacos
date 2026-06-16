@@ -48,6 +48,20 @@ import java.lang.reflect.Method;
  */
 public class AuthFilter implements Filter {
     
+    public static final String PROXY_CLIENT_IP = "Proxy-Client-IP";
+    
+    public static final String X_FORWARDED_FOR = "x-forwarded-for";
+    
+    public static final String WL_PROXY_CLIENT_IP = "WL-Proxy-Client-IP";
+    
+    public static final String REGEX = ",";
+    
+    public static final String AN_OBJECT = "0:0:0:0:0:0:0:1";
+    
+    public static final String LOCALHOST_STRING = "127.0.0.1";
+    
+    public static final String UNKNOWN = "unknown";
+    
     private final AuthConfigs authConfigs;
     
     private final ControllerMethodsCache methodsCache;
@@ -72,8 +86,19 @@ public class AuthFilter implements Filter {
         
         HttpServletRequest req = (HttpServletRequest) request;
         HttpServletResponse resp = (HttpServletResponse) response;
+        String originIp = getRemoteHost(req);
         
-        if (authConfigs.isEnableUserAgentAuthWhite()) {
+        if (StringUtils.isNotBlank(authConfigs.getWhiteIpStr())) {
+            // 这里是新加的过滤规则,某些特定的IP地址可以直接访问Nacos不需要权限校验
+            String whiteIpStr = authConfigs.getWhiteIpStr();
+            
+            for (String ip : whiteIpStr.split(REGEX)) {
+                if (ip.equals(originIp)) {
+                    chain.doFilter(request, response);
+                    return;
+                }
+            }
+        } else if (authConfigs.isEnableUserAgentAuthWhite()) {
             String userAgent = WebUtils.getUserAgent(req);
             if (StringUtils.startsWith(userAgent, Constants.NACOS_SERVER_HEADER)) {
                 chain.doFilter(request, response);
@@ -163,4 +188,25 @@ public class AuthFilter implements Filter {
         request.getSession().setAttribute(com.alibaba.nacos.plugin.auth.constant.Constants.Identity.IDENTITY_CONTEXT,
                 identityContext);
     }
+    
+    /**
+     * 从request里面获取真实IP.
+     *
+     * @param request http request
+     * @return string
+     */
+    private String getRemoteHost(HttpServletRequest request) {
+        String ip = request.getHeader(X_FORWARDED_FOR);
+        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
+            ip = request.getHeader(PROXY_CLIENT_IP);
+        }
+        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
+            ip = request.getHeader(WL_PROXY_CLIENT_IP);
+        }
+        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
+            ip = request.getRemoteAddr();
+        }
+        return AN_OBJECT.equals(ip) ? LOCALHOST_STRING : ip;
+    }
+    
 }
