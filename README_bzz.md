@@ -176,18 +176,31 @@ TDP 验收方案中已明确接受该接口可匿名，**保持原样**。
 
 | 项目 | 要求 |
 |---|---|
-| JDK | 8+（本次验证使用 OpenJDK 21；服务器建议 11 或 17） |
-| Maven | 3.6.3+（本次验证 3.6.3） |
+| **JDK** | **必须用 JDK 8 构建**（仓库已通过 `mise.toml` 约束：`java = "8"`）。**不能用 JDK 9+ 构建**，否则产物在 JDK 8 服务器上运行会报 `NoSuchMethodError: ByteBuffer.flip()Ljava/nio/ByteBuffer;`（见 7.2） |
+| Maven | 3.6.3（`mise.toml` 约束 `maven = "3.6.3"`） |
 | 构建机架构 | x86_64 或 arm64 均可（fat jar 内 `rocksdbjni 7.7.3` 同时包含两种架构） |
 | 网络 | 首次构建需访问 Maven 中央仓库 |
+
+**构建前先确认环境**（务必在项目目录下执行，否则 mise 不会加载 `mise.toml`）：
+
+```bash
+cd /Users/bao/work/idea_workspace/nacos_my
+mise exec -- java -version    # 期望: 1.8.x
+mise exec -- mvn -version     # 期望: Apache Maven 3.6.3, Java version: 1.8.x
+```
+
+> 如果 `mvn -version` 显示的 `Java version` 不是 1.8，说明终端的 `JAVA_HOME` 被其他工具覆盖了。
+> 显式指定：`export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"`
 
 ### 3.2 构建发行包
 
 ```bash
 cd /Users/bao/work/idea_workspace/nacos_my
+export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"
 
 mvn -B clean install \
     -Dmaven.test.skip=true \
+    -Dmaven.simplify.skip=true \
     -Drat.skip=true \
     -Dcheckstyle.skip=true \
     -Dpmd.skip=true \
@@ -201,17 +214,36 @@ mvn -B clean install \
 |---|---|
 | `clean` | **必须**。Maven 增量编译会保留陈旧的 `.class` 文件并直接打进 jar，导致运行期 `NoSuchMethodError`（见 7.2）。只有 `clean` 才能保证产物与源码一致 |
 | `-Dmaven.test.skip=true` | 跳过测试的**编译和运行**。注意不能用 `-DskipTests`——它只跳过运行、仍会编译测试代码，而 `consistency` 的测试类依赖 protobuf 生成顺序，clean 后编译会失败 |
+| `-Dmaven.simplify.skip=true` | **必须**。跳过 `easyj-maven-plugin` 的 `simplify-pom`。该插件用于发布到 Maven 中央仓库时解析 `${revision}`，内部部署不需要；且它与 `protobuf-maven-plugin` 冲突，会让 protobuf 在 jar 打包**之后**二次执行，导致 `nacos-consistency` jar 变成空壳（只有目录没有 class），下游 `core` 模块编译报 `找不到符号 ReadRequest`（见 7.2） |
 | `-Prelease-nacos` | **必须**。激活后 `console` 模块才会执行 `spring-boot:repackage` 生成 fat jar `nacos-server.jar` |
 | `-pl distribution -am` | 只构建 `distribution` 及其上游依赖，省去 test/example 等模块 |
 | `-Drat.skip=true` | 跳过 Apache RAT license 头检查（仓库内有 `.vscode/settings.json` 等本地文件会触发失败） |
-| `-Dcheckstyle.skip -Dpmd.skip` | 跳过代码风格检查 |
+| `-Dcheckstyle.skip -Dpmd.skip=true` | 跳过代码风格检查 |
 
-> ⚠️ **构建前务必确认本地 Maven 仓库中没有老版本 Nacos 残留干扰。** 如果曾经用过 Nacos 1.x / 2.0.x
-> 的 SDK 开发其他项目，本地仓库 `~/.m2/repository/com/alibaba/nacos/` 下会有多个版本的
-> `nacos-common`，其中 1.3 ~ 2.0.1 版本的 `StringUtils.isBlank` 签名是 `(String)`，
-> 2.2.3 是 `(CharSequence)`。增量编译可能链接到错误版本（详见 7.2）。
->
-> 参考：干净完整构建约 50 秒（Apple Silicon，2026 年机器）。
+### 3.2.0 构建产物自检（部署前必做）
+
+构建成功不代表产物可用，**每次构建后执行以下检查**：
+
+```bash
+J=console/target/nacos-server.jar
+
+# ① class 文件版本必须是 52（Java 8）。若是 61/65 说明用了 JDK 17/21 构建
+cd /tmp && rm -rf chk && mkdir chk && cd chk && unzip -o -q "$OLDPWD/$J" 'BOOT-INF/lib/nacos-sys-2.2.3.jar' \
+  && unzip -o -q BOOT-INF/lib/nacos-sys-2.2.3.jar 'com/alibaba/nacos/sys/utils/DiskUtils.class' \
+  && javap -v com/alibaba/nacos/sys/utils/DiskUtils.class | grep "major version"
+#   期望: major version: 52
+
+# ② ByteBuffer.flip 必须返回 Buffer（JDK 8 签名）。若返回 ByteBuffer 说明 JDK 9+ 编译
+javap -c -p com/alibaba/nacos/sys/utils/DiskUtils.class | grep -oE "ByteBuffer\.flip:\(\)Ljava/nio/[A-Za-z]+;"
+#   期望: ByteBuffer.flip:()Ljava/nio/Buffer;
+
+# ③ fat jar 内只有 pure 版 nacos-client，无 shade 版重复类
+unzip -l "$OLDPWD/$J" | grep -E "BOOT-INF/lib/nacos-(common|client|consistency)-"
+#   期望恰好三行: nacos-common-2.2.3.jar / nacos-client-2.2.3-pure.jar / nacos-consistency-2.2.3.jar
+#   nacos-consistency 大小应约 100KB；若只有 ~9KB 说明是空壳（easyj 时序问题）
+```
+
+参考：JDK 8 干净完整构建约 1~2 分钟（Apple Silicon，2026 年机器）。
 
 ### 3.2.1 fat jar 结构说明（本分支修复）
 
@@ -261,8 +293,11 @@ distribution/target/
 ### 3.4 本地开发运行（IDE / 命令行，不打包）
 
 ```bash
+# 0. 切到 mise 约束的 JDK 8
+export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"
+
 # 1. 干净编译全部模块并生成 classpath
-mvn -B clean install -Dmaven.test.skip=true -Drat.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -q
+mvn -B clean install -Dmaven.test.skip=true -Dmaven.simplify.skip=true -Drat.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -q
 mvn -pl console dependency:build-classpath -Dmdep.outputFile=target/cp.txt -q
 
 # 2. 启动（单机模式 + 内嵌 Derby）
@@ -276,6 +311,7 @@ java -Dnacos.standalone=true \
 > `-D` JVM 参数临时注入密钥，**不要把真实密钥写回源码**。
 > 用 `-cp` 方式启动时类加载顺序与 `java -jar`（`PropertiesLauncher`）不同，**不能**用它验证
 > fat jar 是否可用；验证发行包请用 `bash bin/startup.sh -m standalone`。
+> **本地开发也请用 JDK 8**，与生产保持一致，避免 IDE 用 JDK 17/21 编译后本地正常、部署报错的假象。
 
 > 单机模式**必须**用 JVM 参数 `-Dnacos.standalone=true`。
 > `EnvUtil.getStandaloneMode()` 读取的是 System property，程序参数 `--nacos.standalone=true` 无效，
@@ -492,8 +528,10 @@ curl -s -X POST 'http://<ip>:8848/nacos/v1/auth/login' -d 'username=nacos&passwo
 | **token secret.key 必须重新生成** | 用 `openssl rand -base64 48` 在服务器上生成。不要复用文档、聊天记录或他人仓库中出现过的密钥 |
 | **白名单是跳过全部鉴权** | 包括 `/v1/auth/users`（返回密码哈希）。只填固定可信 IP，禁止填 DHCP 动态地址 |
 | **反代场景白名单失效** | Nginx 后面所有请求 `remoteAddr` 都是代理 IP，白名单应在代理层实现 |
+| **四层转发（`stream`）下白名单必须留空** | 本项目生产架构为 `Nginx stream`（TCP 层）转发，后端看到的来源永远是 Nginx IP。若把 Nginx IP 加进 `ipAuthWhite`，等于**全世界免鉴权**。必须把 `ipAuthWhite` 留空或只留 `127.0.0.1`，鉴权靠账号密码（见 7.3） |
 | **集群必须用 MySQL** | 单机可用内嵌 Derby；集群必须外置 MySQL 并执行 `mysql-schema.sql` |
 | **TDP 复验用真实 IP** | 用 `localhost` 会被白名单放行，扫出假阴性 |
+| **构建必须用 JDK 8** | 仓库 `mise.toml` 已约束，但终端 `JAVA_HOME` 可能被其他工具覆盖。用 JDK 9+ 构建出的 jar 在 JDK 8 服务器上会崩（见 7.2） |
 
 ### 7.2 构建踩坑
 
@@ -501,6 +539,9 @@ curl -s -X POST 'http://<ip>:8848/nacos/v1/auth/login' -d 'username=nacos&passwo
 |---|---|---|
 | `Too many files with unapproved license` | Apache RAT 检查，`.vscode/settings.json` 等本地文件无 license 头 | 加 `-Drat.skip=true` |
 | `clean` 后 `ProtoMessageUtilTest.java` 报 `找不到 WriteRequestOrBuilder 的类文件` | `-DskipTests` 只跳过测试**运行**，仍会编译测试代码；`consistency` 的测试类依赖 protobuf 生成结果，clean 后编译顺序不满足 | 改用 `-Dmaven.test.skip=true`（跳过编译 + 运行） |
+| **`core` 模块编译报 `程序包 com.alibaba.nacos.consistency.entity 不存在` / `找不到符号 ReadRequest`**，但 `consistency` 模块显示 SUCCESS | `easyj-maven-plugin` 的 `simplify-pom` 把 `.flattened-pom.xml` 设为项目 POM 后，触发 `protobuf-maven-plugin` **在 jar 打包之后二次执行**。jar 打包时 `target/classes` 还没有 class，产出空壳 jar（~9KB，只有目录和 .proto）。**此问题随机触发**（取决于插件执行时序的竞争结果），JDK 8 下更容易复现 | 加 `-Dmaven.simplify.skip=true`。该插件仅用于发布 Maven 中央仓库，内部部署不需要 |
+| **控制台 `/v1/console/server/announcement` 返回 500，`NoSuchMethodError: java.nio.ByteBuffer.flip()Ljava/nio/ByteBuffer;`** | **用 JDK 9+ 构建了 jar，服务器用 JDK 8 运行**。JDK 9 起 `ByteBuffer.flip()` 协变返回 `ByteBuffer`，JDK 8 返回 `Buffer`。根 pom 只配了 `source/target=1.8` **没有** `release`，JDK 21 的 javac 会链接自身 API 生成 JDK 9+ 签名的字节码。`DiskUtils.readFile()` 是第一个踩雷的调用点 | **用 JDK 8 构建**（`mise.toml` 约束），构建后按 3.2.0 自检 `major version: 52` 和 `flip()Ljava/nio/Buffer;` |
+| `mise.toml` 不生效，`java -version` 仍是 21 | mise 只对**项目目录下的交互式 shell** 生效；终端 cwd 漂移到其他目录、或 `JAVA_HOME` 被别的工具硬设时失效。Maven 用的是 `JAVA_HOME`，不是 `mise current` | 构建前显式 `export JAVA_HOME="$(mise where java)"`；用 `mvn -version` 的 `Java version` 行而非 `java -version` 判断 |
 | 生成不了 `nacos-server.jar` | 未激活 profile | 必须加 `-Prelease-nacos` |
 | 重跑 shade 报 `duplicate entry: META-INF/services/...ServerProvider` | `client/target` 残留上次 shade 产物 | 构建前 `rm -rf client/target`，或直接用 `clean` |
 | **启动报 `NoSuchMethodError: StringUtils.isBlank(Ljava/lang/String;)Z`**（`EnvUtil.getNacosHome`） | **两个独立原因，都会导致同一报错**：① **Maven 增量编译残留**——`sys/target/classes` 中的 `EnvUtil.class` 是更早某次编译的产物，当时链接到了老版本 `nacos-common`（1.3 ~ 2.0.1 的 `isBlank` 签名是 `(String)`，2.2.3 改为 `(CharSequence)`），源码未变则 Maven 不重编译，陈旧 class 直接进 jar；② **fat jar 重复类**——shade 版 `nacos-client` 内含被 `minimizeJar` 裁剪的 `StringUtils` 副本，`PropertiesLauncher` 可能先加载它 | ① **构建必须加 `clean`**；② 本分支已在 `console/pom.xml` 修复（见 3.2.1）。两者缺一不可——只做 ② 陈旧 class 仍会报错，只做 ① 重复类仍可能触发 |
@@ -517,6 +558,8 @@ curl -s -X POST 'http://<ip>:8848/nacos/v1/auth/login' -d 'username=nacos&passwo
 | `the length of secret key must great than or equal 32 bytes` | 开启鉴权但 `token.secret.key` 为空或不合规 | 填入 Base64 编码、解码后 ≥ 32 字节的密钥 |
 | `/v1/auth/users` 返回 500 | 缺少必填参数 | 必须带 `search=blur` 或 `search=accurate`，不是 bug |
 | SDK `getConfig` 返回 `null` 但 `publishConfig` 为 `true` | 客户端 `namespace` 设为 `"public"`，实际变成了一个不存在的租户 | 默认命名空间的 ID 是**空字符串**，不要设置 `namespace=public` |
+| **鉴权已开启，但所有匿名请求仍返回 200（含 `/v1/auth/users` 泄露密码哈希）** | **Nginx 四层转发 + `ipAuthWhite` 含 Nginx IP**。`stream` 块不解析 HTTP，后端 `remoteAddr` 永远是 Nginx 的 IP，白名单命中即全部放行。IP 白名单功能在四层转发架构下**从设计上不成立** | `ipAuthWhite` 留空或只留 `127.0.0.1`，所有客户端配账号密码。如需按来源放行，改在 Nginx 层用 `allow/deny` |
+| **启动即崩 `EXCEPTION_ILLEGAL_INSTRUCTION`，problematic frame `librocksdbjni*.dll`** | 运行机器的 CPU/OS 不支持 `rocksdbjni 7.7.3` 用到的 SIMD 指令。实测：Xeon E7-4800 v2 + **Windows Server 2008 R2** 崩溃（2008 R2 内核不保存 AVX 寄存器状态）；Xeon Gold 5318H + Server 2019 正常 | Nacos 只部署在较新的机器上；老机器只做 Nginx 转发。若必须在老机器运行，需降级 `rocksdbjni` 到 5.18.4（但该版本无 arm64，不能在 Apple Silicon 上测试） |
 
 ### 7.4 从旧版本升级
 
