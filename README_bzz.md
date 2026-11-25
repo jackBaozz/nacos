@@ -33,6 +33,7 @@
 | `core/src/main/java/com/alibaba/nacos/core/auth/AuthFilter.java` | 官方文件，新增逻辑 | HTTP 侧：IP 白名单放行、老客户端匿名放行、白名单取 IP 安全修复 |
 | `core/src/main/java/com/alibaba/nacos/core/auth/RemoteRequestAuthFilter.java` | 官方文件，新增逻辑 | gRPC 侧：老客户端匿名放行 |
 | `console/src/main/java/com/alibaba/nacos/console/controller/NamespaceController.java` | 官方文件，补注解 | 3 个 GET 接口补 `@Secured(READ)` |
+| `console/pom.xml` | 官方文件，`release-nacos` profile 增强 | 排除 shade 版 `nacos-client`，改用 `pure` 版，消除 fat jar 重复类（见 3.2.1） |
 | `console/src/main/resources/application.properties` | 配置（源码默认值） | 鉴权开关、白名单、identity、token key |
 | `distribution/conf/application.properties` | 配置（发行包默认值） | **部署时实际生效的配置**，新增白名单与兼容开关占位 |
 | `config/.../datasource/ExternalDataSourceProperties.java` | 官方文件，改常量 | MySQL 驱动类名 `com.mysql.cj.jdbc.Driver` → `com.mysql.jdbc.Driver`（兼容 MySQL 5.x 老驱动） |
@@ -125,6 +126,19 @@ public RestResult<List<Namespace>> getNamespaces() { ... }
 无法加 `@Secured`。Nacos Client SDK 不依赖此接口（源码中零引用）。
 TDP 验收方案中已明确接受该接口可匿名，**保持原样**。
 
+#### （6）fat jar 打包修复（`console/pom.xml`）
+
+官方 2.2.3 在 `-Prelease-nacos` 下构建出的 `nacos-server.jar` 内，`StringUtils` 等常用工具类
+存在**两份副本**（独立的 `nacos-common.jar` + shade 进 `nacos-client.jar` 的裁剪版）。
+`PropertiesLauncher`（`startup.cmd` / `java -jar`）可能先加载裁剪版，触发
+`NoSuchMethodError: StringUtils.isBlank(Ljava/lang/String;)Z`。
+
+修复方式见 [3.2.1](#321-fat-jar-结构说明本分支修复)：对 4 个直接依赖排除 shade 版 `nacos-client`，
+改依赖 `pure` classifier。仅影响 server fat jar，不影响 SDK 发布包。
+
+> 此问题在官方发行包中不会出现，因为官方是在**不激活** `release-nacos` 的情况下单独构建 console 的。
+> 本分支需要在同一 profile 下同时产出 SDK 和 server，所以必须显式处理。
+
 ---
 
 ## 二、安全复验结论
@@ -172,8 +186,8 @@ TDP 验收方案中已明确接受该接口可匿名，**保持原样**。
 ```bash
 cd /Users/bao/work/idea_workspace/nacos_my
 
-mvn -B install \
-    -DskipTests \
+mvn -B clean install \
+    -Dmaven.test.skip=true \
     -Drat.skip=true \
     -Dcheckstyle.skip=true \
     -Dpmd.skip=true \
@@ -185,15 +199,42 @@ mvn -B install \
 
 | 参数 | 作用 |
 |---|---|
+| `clean` | **必须**。Maven 增量编译会保留陈旧的 `.class` 文件并直接打进 jar，导致运行期 `NoSuchMethodError`（见 7.2）。只有 `clean` 才能保证产物与源码一致 |
+| `-Dmaven.test.skip=true` | 跳过测试的**编译和运行**。注意不能用 `-DskipTests`——它只跳过运行、仍会编译测试代码，而 `consistency` 的测试类依赖 protobuf 生成顺序，clean 后编译会失败 |
 | `-Prelease-nacos` | **必须**。激活后 `console` 模块才会执行 `spring-boot:repackage` 生成 fat jar `nacos-server.jar` |
 | `-pl distribution -am` | 只构建 `distribution` 及其上游依赖，省去 test/example 等模块 |
 | `-Drat.skip=true` | 跳过 Apache RAT license 头检查（仓库内有 `.vscode/settings.json` 等本地文件会触发失败） |
 | `-Dcheckstyle.skip -Dpmd.skip` | 跳过代码风格检查 |
-| `-DskipTests` | 跳过单元测试 |
 
-> ⚠️ **不要加 `clean`**。`consistency` 模块使用 `protobuf-maven-plugin` 生成 Java 类，
-> `clean` 后首次构建会出现 `ReadRequest` / `WriteRequest` 找不到的编译错误。
-> 若必须 clean，请先单独构建一次 `consistency` 模块，再构建整体。
+> ⚠️ **构建前务必确认本地 Maven 仓库中没有老版本 Nacos 残留干扰。** 如果曾经用过 Nacos 1.x / 2.0.x
+> 的 SDK 开发其他项目，本地仓库 `~/.m2/repository/com/alibaba/nacos/` 下会有多个版本的
+> `nacos-common`，其中 1.3 ~ 2.0.1 版本的 `StringUtils.isBlank` 签名是 `(String)`，
+> 2.2.3 是 `(CharSequence)`。增量编译可能链接到错误版本（详见 7.2）。
+>
+> 参考：干净完整构建约 50 秒（Apple Silicon，2026 年机器）。
+
+### 3.2.1 fat jar 结构说明（本分支修复）
+
+官方 2.2.3 在 `-Prelease-nacos` 下，`client` 模块的 `maven-shade-plugin` 会把 `nacos-common` /
+`nacos-api` 合并进 `nacos-client` jar（对外发布的 SDK 需要）。但 `console` 的 fat jar 又同时打入了
+独立的 `nacos-common-2.2.3.jar`，造成 **同一个类在 fat jar 中有两份副本**，且 shade 版经过
+`minimizeJar` 裁剪，方法不全。`PropertiesLauncher`（`startup.cmd` 和 `java -jar` 都走它）的
+类加载顺序可能先命中裁剪版，导致 `NoSuchMethodError`。
+
+本分支在 `console/pom.xml` 的 `release-nacos` profile 中：
+1. 对 `nacos-config` / `nacos-naming` / `nacos-istio` / `nacos-prometheus` 排除传递进来的 shade 版 `nacos-client`
+2. 显式依赖 `nacos-client` 的 `pure` classifier（未 shade 的普通 jar，同一 profile 下产出）
+
+修复后 fat jar 内只有 `nacos-common-2.2.3.jar` + `nacos-client-2.2.3-pure.jar`，无重复类。
+此修改仅影响 server fat jar，**不影响**对外发布的 `nacos-client-2.2.3.jar` SDK。
+
+验证命令：
+```bash
+unzip -l console/target/nacos-server.jar | grep -E "BOOT-INF/lib/nacos-(common|client)-"
+# 期望输出恰好两行：
+#   BOOT-INF/lib/nacos-common-2.2.3.jar
+#   BOOT-INF/lib/nacos-client-2.2.3-pure.jar
+```
 
 ### 3.3 产物
 
@@ -220,14 +261,21 @@ distribution/target/
 ### 3.4 本地开发运行（IDE / 命令行，不打包）
 
 ```bash
-# 1. 编译全部模块并生成 classpath
-mvn -B install -DskipTests -Drat.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -q
+# 1. 干净编译全部模块并生成 classpath
+mvn -B clean install -Dmaven.test.skip=true -Drat.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -q
 mvn -pl console dependency:build-classpath -Dmdep.outputFile=target/cp.txt -q
 
 # 2. 启动（单机模式 + 内嵌 Derby）
 cd console
-java -Dnacos.standalone=true -cp "target/classes:$(cat target/cp.txt)" com.alibaba.nacos.Nacos
+java -Dnacos.standalone=true \
+     -Dnacos.core.auth.plugin.nacos.token.secret.key=$(openssl rand -base64 48) \
+     -cp "target/classes:$(cat target/cp.txt)" com.alibaba.nacos.Nacos
 ```
+
+> 源码默认配置 `nacos.core.auth.enabled=true` 且 `token.secret.key` 留空，本地启动必须用
+> `-D` JVM 参数临时注入密钥，**不要把真实密钥写回源码**。
+> 用 `-cp` 方式启动时类加载顺序与 `java -jar`（`PropertiesLauncher`）不同，**不能**用它验证
+> fat jar 是否可用；验证发行包请用 `bash bin/startup.sh -m standalone`。
 
 > 单机模式**必须**用 JVM 参数 `-Dnacos.standalone=true`。
 > `EnvUtil.getStandaloneMode()` 读取的是 System property，程序参数 `--nacos.standalone=true` 无效，
@@ -452,8 +500,11 @@ curl -s -X POST 'http://<ip>:8848/nacos/v1/auth/login' -d 'username=nacos&passwo
 | 问题 | 原因 | 解决 |
 |---|---|---|
 | `Too many files with unapproved license` | Apache RAT 检查，`.vscode/settings.json` 等本地文件无 license 头 | 加 `-Drat.skip=true` |
-| `ReadRequest` / `WriteRequest` 找不到 | `clean` 后 `consistency` 模块 protobuf 生成时序问题 | 构建不加 `clean`；或先单独构建 `consistency` |
+| `clean` 后 `ProtoMessageUtilTest.java` 报 `找不到 WriteRequestOrBuilder 的类文件` | `-DskipTests` 只跳过测试**运行**，仍会编译测试代码；`consistency` 的测试类依赖 protobuf 生成结果，clean 后编译顺序不满足 | 改用 `-Dmaven.test.skip=true`（跳过编译 + 运行） |
 | 生成不了 `nacos-server.jar` | 未激活 profile | 必须加 `-Prelease-nacos` |
+| 重跑 shade 报 `duplicate entry: META-INF/services/...ServerProvider` | `client/target` 残留上次 shade 产物 | 构建前 `rm -rf client/target`，或直接用 `clean` |
+| **启动报 `NoSuchMethodError: StringUtils.isBlank(Ljava/lang/String;)Z`**（`EnvUtil.getNacosHome`） | **两个独立原因，都会导致同一报错**：① **Maven 增量编译残留**——`sys/target/classes` 中的 `EnvUtil.class` 是更早某次编译的产物，当时链接到了老版本 `nacos-common`（1.3 ~ 2.0.1 的 `isBlank` 签名是 `(String)`，2.2.3 改为 `(CharSequence)`），源码未变则 Maven 不重编译，陈旧 class 直接进 jar；② **fat jar 重复类**——shade 版 `nacos-client` 内含被 `minimizeJar` 裁剪的 `StringUtils` 副本，`PropertiesLauncher` 可能先加载它 | ① **构建必须加 `clean`**；② 本分支已在 `console/pom.xml` 修复（见 3.2.1）。两者缺一不可——只做 ② 陈旧 class 仍会报错，只做 ① 重复类仍可能触发 |
+| 用 `-cp target/classes:...` 能启动，但 `java -jar nacos-server.jar` 报错 | 两者类加载顺序不同：`-cp` 方式可能被 shade 版副本"兜底"掩盖问题 | 验证发行包必须用 `java -jar` 或 `bin/startup.sh`，不要用 `-cp` |
 | 旧 `nacos-server.jar` 在 Apple Silicon 上 `UnsatisfiedLinkError: librocksdbjni ... incompatible architecture` | 2023 年的旧构建产物内含 `rocksdbjni 5.18.4`，无 arm64 | 重新构建，新产物为 `rocksdbjni 7.7.3`，同时含 x86_64 / arm64 |
 
 ### 7.3 运行踩坑

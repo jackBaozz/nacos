@@ -98,6 +98,63 @@
     <profiles>
         <profile>
             <id>release-nacos</id>
+            <dependencies>
+                <!--
+                    release-nacos 下 nacos-client 会被 shade 成合并了 nacos-common/nacos-api 的 uber jar，
+                    再被 spring-boot 打进 fat jar 时与独立的 nacos-common.jar 产生重复类，
+                    PropertiesLauncher(Windows startup.cmd) 可能优先加载被 minimizeJar 裁剪过的副本，
+                    导致 NoSuchMethodError: StringUtils.isBlank。
+                    这里对传递引入 shade 版的依赖做排除，并显式依赖 pure classifier（未 shade 的普通 jar）。
+                    仅影响 server fat jar，不影响对外发布的 nacos-client SDK jar。
+                -->
+                <dependency>
+                    <groupId>${project.groupId}</groupId>
+                    <artifactId>nacos-config</artifactId>
+                    <version>${project.version}</version>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>nacos-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>${project.groupId}</groupId>
+                    <artifactId>nacos-naming</artifactId>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>nacos-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>${project.groupId}</groupId>
+                    <artifactId>nacos-istio</artifactId>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>nacos-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>${project.groupId}</groupId>
+                    <artifactId>nacos-prometheus</artifactId>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>nacos-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+                <dependency>
+                    <groupId>${project.groupId}</groupId>
+                    <artifactId>nacos-client</artifactId>
+                    <version>${project.version}</version>
+                    <classifier>pure</classifier>
+                </dependency>
+            </dependencies>
             <build>
                 <finalName>nacos-server</finalName>
                 <plugins>
