@@ -119,7 +119,10 @@ public class AuthFilter implements Filter {
         
         HttpServletRequest req = (HttpServletRequest) request;
         HttpServletResponse resp = (HttpServletResponse) response;
-        String originIp = getRemoteHost(req);
+        
+        // 【安全修复】IP 白名单只信任 TCP 层真实来源地址，不读取 X-Forwarded-For 等客户端可伪造的请求头，
+        // 否则任意攻击者只需伪造请求头为白名单 IP 即可绕过全部鉴权。
+        String originIp = getRealRemoteIp(req);
         
         // 【兼容逻辑】检查是否是需要匿名放行的老客户端请求
         if (isLegacyClientAllowed(req)) {
@@ -229,22 +232,20 @@ public class AuthFilter implements Filter {
     }
     
     /**
-     * 从request里面获取真实IP.
+     * 获取用于 IP 白名单比对的来源地址.
+     *
+     * <p>仅使用 TCP 层的 {@code remoteAddr}，不读取 X-Forwarded-For / Proxy-Client-IP /
+     * WL-Proxy-Client-IP 等请求头：这些头由客户端任意填写，若据此做白名单判断，
+     * 攻击者只需伪造为白名单 IP 即可绕过全部鉴权。
+     *
+     * <p>若部署在可信反向代理之后，请在代理层做白名单，或由代理覆盖写入 remoteAddr，
+     * 而不是在这里信任转发头。
      *
      * @param request http request
      * @return string
      */
-    private String getRemoteHost(HttpServletRequest request) {
-        String ip = request.getHeader(X_FORWARDED_FOR);
-        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
-            ip = request.getHeader(PROXY_CLIENT_IP);
-        }
-        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
-            ip = request.getHeader(WL_PROXY_CLIENT_IP);
-        }
-        if (ip == null || ip.length() == 0 || UNKNOWN.equalsIgnoreCase(ip)) {
-            ip = request.getRemoteAddr();
-        }
+    private String getRealRemoteIp(HttpServletRequest request) {
+        String ip = request.getRemoteAddr();
         return AN_OBJECT.equals(ip) ? LOCALHOST_STRING : ip;
     }
     
