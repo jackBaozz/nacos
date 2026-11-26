@@ -178,6 +178,7 @@ TDP 验收方案中已明确接受该接口可匿名，**保持原样**。
 |---|---|
 | **JDK** | **必须用 JDK 8 构建**（仓库已通过 `mise.toml` 约束：`java = "8"`）。**不能用 JDK 9+ 构建**，否则产物在 JDK 8 服务器上运行会报 `NoSuchMethodError: ByteBuffer.flip()Ljava/nio/ByteBuffer;`（见 7.2） |
 | Maven | 3.6.3（`mise.toml` 约束 `maven = "3.6.3"`） |
+| mvnd | 0.8.2（`mise.toml` 约束 `mvnd = "0.8.2"`，Maven 守护进程版，内嵌 Maven 3.8.6，构建更快） |
 | 构建机架构 | x86_64 或 arm64 均可（fat jar 内 `rocksdbjni 7.7.3` 同时包含两种架构） |
 | 网络 | 首次构建需访问 Maven 中央仓库 |
 
@@ -185,40 +186,58 @@ TDP 验收方案中已明确接受该接口可匿名，**保持原样**。
 
 ```bash
 cd /Users/bao/work/idea_workspace/nacos_my
-mise exec -- java -version    # 期望: 1.8.x
-mise exec -- mvn -version     # 期望: Apache Maven 3.6.3, Java version: 1.8.x
+mise exec -- java -version     # 期望: 1.8.x
+mise exec -- mvn -version      # 期望: Apache Maven 3.6.3, Java version: 1.8.x
+mise exec -- mvnd --version    # 期望: mvnd 0.8.2, Apache Maven 3.8.6, Java version: 1.8.x
 ```
 
-> 如果 `mvn -version` 显示的 `Java version` 不是 1.8，说明终端的 `JAVA_HOME` 被其他工具覆盖了。
+> 如果 `Java version` 不是 1.8，说明终端的 `JAVA_HOME` 被其他工具覆盖了。
 > 显式指定：`export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"`
 
 ### 3.2 构建发行包
 
+**严格使用官方 `BUILDING` 文档的全量 reactor 命令**，不要加 `-pl` / `-am`（原因见 7.2）。
+`maven.simplify.skip=true` 已固化在根 `pom.xml` 的 `<properties>` 中，命令行无需再传。
+
+**方式 A：mvnd（推荐，约 45 秒）**
+
 ```bash
 cd /Users/bao/work/idea_workspace/nacos_my
-export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"
+export JAVA_HOME="$(mise where java)" && export PATH="$(mise where mvnd)/bin:$JAVA_HOME/bin:$PATH"
 
-mvn -B clean install \
-    -Dmaven.test.skip=true \
-    -Dmaven.simplify.skip=true \
-    -Drat.skip=true \
-    -Dcheckstyle.skip=true \
-    -Dpmd.skip=true \
-    -Prelease-nacos \
-    -pl distribution -am
+mvnd -Prelease-nacos -Dmaven.test.skip=true -Drat.skip=true clean install -U
 ```
+
+**方式 B：mvn（约 60 秒）**
+
+```bash
+cd /Users/bao/work/idea_workspace/nacos_my
+export JAVA_HOME="$(mise where java)" && export PATH="$(mise where maven)/bin:$JAVA_HOME/bin:$PATH"
+
+mvn -Prelease-nacos -Dmaven.test.skip=true -Drat.skip=true clean install -U
+```
+
+> `-Drat.skip=true` 是官方命令之外**唯一**需要加的参数：仓库内 `.vscode/settings.json`、
+> `build-release.sh` 等本地文件没有 license 头，会触发 Apache RAT 检查失败。
+> 若连续构建遇到 mvnd daemon 文件锁残留，先执行 `mvnd --stop` 再重试。
 
 参数说明：
 
 | 参数 | 作用 |
 |---|---|
-| `clean` | **必须**。Maven 增量编译会保留陈旧的 `.class` 文件并直接打进 jar，导致运行期 `NoSuchMethodError`（见 7.2）。只有 `clean` 才能保证产物与源码一致 |
+| `clean` | **必须**。Maven 增量编译会保留陈旧的 `.class` 文件并直接打进 jar，导致运行期 `NoSuchMethodError`（见 7.2） |
 | `-Dmaven.test.skip=true` | 跳过测试的**编译和运行**。注意不能用 `-DskipTests`——它只跳过运行、仍会编译测试代码，而 `consistency` 的测试类依赖 protobuf 生成顺序，clean 后编译会失败 |
-| `-Dmaven.simplify.skip=true` | **必须**。跳过 `easyj-maven-plugin` 的 `simplify-pom`。该插件用于发布到 Maven 中央仓库时解析 `${revision}`，内部部署不需要；且它与 `protobuf-maven-plugin` 冲突，会让 protobuf 在 jar 打包**之后**二次执行，导致 `nacos-consistency` jar 变成空壳（只有目录没有 class），下游 `core` 模块编译报 `找不到符号 ReadRequest`（见 7.2） |
 | `-Prelease-nacos` | **必须**。激活后 `console` 模块才会执行 `spring-boot:repackage` 生成 fat jar `nacos-server.jar` |
-| `-pl distribution -am` | 只构建 `distribution` 及其上游依赖，省去 test/example 等模块 |
-| `-Drat.skip=true` | 跳过 Apache RAT license 头检查（仓库内有 `.vscode/settings.json` 等本地文件会触发失败） |
-| `-Dcheckstyle.skip -Dpmd.skip=true` | 跳过代码风格检查 |
+| `-U` | 强制刷新 SNAPSHOT / 检查远程更新（官方命令自带） |
+| `-Drat.skip=true` | 跳过 Apache RAT license 头检查 |
+| `maven.simplify.skip=true`（pom 固化） | 跳过 `easyj-maven-plugin` 的 `simplify-pom`。该插件用于发布到 Maven 中央仓库时解析 `${revision}`，内部部署不需要；且它会在 package 阶段替换项目 POM，触发 `protobuf-maven-plugin` 的 `compile-custom` 在 jar 打包**之后**才执行，导致 `nacos-istio` / `nacos-consistency` jar 随机丢失 grpc 生成类（见 7.2）。已写入根 pom `<properties>`，无需命令行传递 |
+
+**不要使用的参数**：
+
+| 参数 | 原因 |
+|---|---|
+| `-pl distribution -am` | 改变 Maven 对上游模块 POM 的解析路径，加剧 protobuf 插件时序错乱。官方命令是全量 reactor |
+| `-DskipTests` | 仍会编译测试代码，`consistency` 的 `ProtoMessageUtilTest` 在 clean 后编译失败 |
 
 ### 3.2.0 构建产物自检（部署前必做）
 
@@ -238,12 +257,28 @@ javap -c -p com/alibaba/nacos/sys/utils/DiskUtils.class | grep -oE "ByteBuffer\.
 #   期望: ByteBuffer.flip:()Ljava/nio/Buffer;
 
 # ③ fat jar 内只有 pure 版 nacos-client，无 shade 版重复类
-unzip -l "$OLDPWD/$J" | grep -E "BOOT-INF/lib/nacos-(common|client|consistency)-"
-#   期望恰好三行: nacos-common-2.2.3.jar / nacos-client-2.2.3-pure.jar / nacos-consistency-2.2.3.jar
-#   nacos-consistency 大小应约 100KB；若只有 ~9KB 说明是空壳（easyj 时序问题）
+unzip -l "$OLDPWD/$J" | grep -E "BOOT-INF/lib/nacos-(common|client|consistency|istio)-"
+#   期望恰好四行: nacos-common-2.2.3.jar / nacos-client-2.2.3-pure.jar / nacos-consistency-2.2.3.jar / nacos-istio-2.2.3.jar
+#   nacos-consistency 应约 100KB、nacos-istio 应约 1.4MB；若 consistency 只有 ~9KB 或 istio 只有 ~1.41MB 以下是空壳
+
+# ④ protobuf 生成的 grpc 类必须存在（随机丢失会导致服务器启动 NoClassDefFoundError）
+cd "$OLDPWD" && rm -rf /tmp/chk2 && mkdir -p /tmp/chk2 && cd /tmp/chk2 \
+  && unzip -o -q "$OLDPWD/$J" 'BOOT-INF/lib/nacos-istio-2.2.3.jar' 'BOOT-INF/lib/nacos-consistency-2.2.3.jar'
+unzip -l BOOT-INF/lib/nacos-istio-2.2.3.jar | grep -c "istio/mcp/v1alpha1/.*\.class"
+#   期望: 83（坏包只有 68~69）
+unzip -l BOOT-INF/lib/nacos-istio-2.2.3.jar | grep -c "ResourceSourceGrpc\$ResourceSourceImplBase"
+#   期望: 1（为 0 则服务器启动必崩）
+unzip -l BOOT-INF/lib/nacos-consistency-2.2.3.jar | grep -c "entity/ReadRequest.class"
+#   期望: 1
+
+# ⑤ 对外版本号（本分支故意隐藏真实版本）
+unzip -p BOOT-INF/lib/nacos-common-2.2.3.jar nacos-version.txt
+#   期望: version=9.9.9
 ```
 
-参考：JDK 8 干净完整构建约 1~2 分钟（Apple Silicon，2026 年机器）。
+> 也可直接执行仓库根目录的 `bash build-release.sh mvnd`，它会构建并自动完成以上全部检查，任一项失败以非 0 退出。
+
+参考：mvnd 全量构建约 45 秒、mvn 约 60 秒（Apple Silicon，2026 年机器）。
 
 ### 3.2.1 fat jar 结构说明（本分支修复）
 
@@ -296,8 +331,8 @@ distribution/target/
 # 0. 切到 mise 约束的 JDK 8
 export JAVA_HOME="$(mise where java)" && export PATH="$JAVA_HOME/bin:$PATH"
 
-# 1. 干净编译全部模块并生成 classpath
-mvn -B clean install -Dmaven.test.skip=true -Dmaven.simplify.skip=true -Drat.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -q
+# 1. 全量编译（官方命令，maven.simplify.skip 已固化在 pom）
+mvn -Prelease-nacos -Dmaven.test.skip=true -Drat.skip=true clean install -U -q
 mvn -pl console dependency:build-classpath -Dmdep.outputFile=target/cp.txt -q
 
 # 2. 启动（单机模式 + 内嵌 Derby）
@@ -539,7 +574,9 @@ curl -s -X POST 'http://<ip>:8848/nacos/v1/auth/login' -d 'username=nacos&passwo
 |---|---|---|
 | `Too many files with unapproved license` | Apache RAT 检查，`.vscode/settings.json` 等本地文件无 license 头 | 加 `-Drat.skip=true` |
 | `clean` 后 `ProtoMessageUtilTest.java` 报 `找不到 WriteRequestOrBuilder 的类文件` | `-DskipTests` 只跳过测试**运行**，仍会编译测试代码；`consistency` 的测试类依赖 protobuf 生成结果，clean 后编译顺序不满足 | 改用 `-Dmaven.test.skip=true`（跳过编译 + 运行） |
-| **`core` 模块编译报 `程序包 com.alibaba.nacos.consistency.entity 不存在` / `找不到符号 ReadRequest`**，但 `consistency` 模块显示 SUCCESS | `easyj-maven-plugin` 的 `simplify-pom` 把 `.flattened-pom.xml` 设为项目 POM 后，触发 `protobuf-maven-plugin` **在 jar 打包之后二次执行**。jar 打包时 `target/classes` 还没有 class，产出空壳 jar（~9KB，只有目录和 .proto）。**此问题随机触发**（取决于插件执行时序的竞争结果），JDK 8 下更容易复现 | 加 `-Dmaven.simplify.skip=true`。该插件仅用于发布 Maven 中央仓库，内部部署不需要 |
+| **`core` 模块编译报 `程序包 com.alibaba.nacos.consistency.entity 不存在` / `找不到符号 ReadRequest`**，但 `consistency` 模块显示 SUCCESS | `easyj-maven-plugin` 的 `simplify-pom` 在 package 阶段把 `.flattened-pom.xml` 设为项目 POM，触发 `protobuf-maven-plugin` **在 jar 打包之后二次执行**。jar 打包时 `target/classes` 还没有 grpc 生成类，产出空壳 jar。**此问题随机触发**（取决于插件执行时序的竞争结果），JDK 8 下更容易复现 | `maven.simplify.skip=true` 已固化在根 pom `<properties>`。该插件仅用于发布 Maven 中央仓库，内部部署不需要 |
+| **服务器启动报 `NoClassDefFoundError: istio/mcp/v1alpha1/ResourceSourceGrpc$ResourceSourceImplBase`**（`NacosMcpService` 加载失败） | 同上，这次轮到 `istio` 模块：`compile-custom` 产出的 `*Grpc` 类在 jar 之后才生成，`nacos-istio` jar 只有 68 个类（完整应为 83） | 同上。部署前按 3.2.0 ④ 检查 `ResourceSourceGrpc$ResourceSourceImplBase` 是否存在 |
+| **`-pl distribution -am` 构建出的 jar 更容易丢类** | `-am` 模式改变 Maven 对上游 POM 的解析路径，加剧上述时序错乱 | **严格用官方全量 reactor 命令**，不加 `-pl` / `-am` |
 | **控制台 `/v1/console/server/announcement` 返回 500，`NoSuchMethodError: java.nio.ByteBuffer.flip()Ljava/nio/ByteBuffer;`** | **用 JDK 9+ 构建了 jar，服务器用 JDK 8 运行**。JDK 9 起 `ByteBuffer.flip()` 协变返回 `ByteBuffer`，JDK 8 返回 `Buffer`。根 pom 只配了 `source/target=1.8` **没有** `release`，JDK 21 的 javac 会链接自身 API 生成 JDK 9+ 签名的字节码。`DiskUtils.readFile()` 是第一个踩雷的调用点 | **用 JDK 8 构建**（`mise.toml` 约束），构建后按 3.2.0 自检 `major version: 52` 和 `flip()Ljava/nio/Buffer;` |
 | `mise.toml` 不生效，`java -version` 仍是 21 | mise 只对**项目目录下的交互式 shell** 生效；终端 cwd 漂移到其他目录、或 `JAVA_HOME` 被别的工具硬设时失效。Maven 用的是 `JAVA_HOME`，不是 `mise current` | 构建前显式 `export JAVA_HOME="$(mise where java)"`；用 `mvn -version` 的 `Java version` 行而非 `java -version` 判断 |
 | 生成不了 `nacos-server.jar` | 未激活 profile | 必须加 `-Prelease-nacos` |
