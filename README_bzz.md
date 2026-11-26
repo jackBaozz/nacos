@@ -206,7 +206,11 @@ cd /Users/bao/work/idea_workspace/nacos_my
 export JAVA_HOME="$(mise where java)" && export PATH="$(mise where mvnd)/bin:$JAVA_HOME/bin:$PATH"
 
 mvnd -Prelease-nacos -Dmaven.test.skip=true -Drat.skip=true clean install -U
+mvnd --stop    # 构建完成后停掉 mvnd 后台 daemon，避免 Java 进程常驻
 ```
+
+> mvnd 为加速下次构建会在后台保留一个 Java daemon 进程，构建结束后不会自动退出。
+> 日常使用建议每次构建后执行 `mvnd --stop`；或设置环境变量 `MVND_DAEMON_IDLE_TIMEOUT=5000`（毫秒）让其空闲后自动退出。
 
 **方式 B：mvn（约 60 秒）**
 
